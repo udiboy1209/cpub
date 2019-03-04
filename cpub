@@ -1,0 +1,257 @@
+#!/usr/bin/env python
+'''
+cpub: ncurses based epub reader for the command line
+
+'''
+from __future__ import print_function
+
+import curses
+import curses.ascii
+from html.parser import HTMLParser
+import os
+import sys
+import io
+import zipfile
+import textwrap
+
+def eprint(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+from bs4 import BeautifulSoup
+
+
+def parse_chapter(zfile, chfname, ssize):
+    # eprint("parse chapter", chfname)
+    class Parser(HTMLParser):
+        def __init__(self, stream):
+            HTMLParser.__init__(self)
+            self.stream = stream
+
+        def handle_data(self, data):
+            self.stream.write(data)
+
+        def handle_starttag(self, tag, attr):
+            if tag == "p":
+                self.stream.write(' ')
+            elif tag == "i":
+                self.stream.write('#I')
+            elif tag == "b":
+                self.stream.write('#B')
+
+        def handle_endtag(self, tag):
+            if tag == "p":
+                self.stream.write('\n')
+            elif tag == "i":
+                self.stream.write('#i')
+            elif tag == "b":
+                self.stream.write('#b')
+
+    l,c = ssize
+    nch = l*c
+
+    soup = BeautifulSoup(zfile.read(chfname), 'html5lib')
+    html_snip = str(soup.find('body'))
+    # eprint("html:", html_snip)
+
+    stream = io.StringIO()
+    p = Parser(stream)
+    p.feed(html_snip)
+    p.close()
+
+    wp = textwrap.TextWrapper(width=c)
+    al = []
+
+    for para in stream.getvalue().split('\n'):
+        pl = wp.wrap(para)
+        al.extend(pl)
+    return [al[i:i+l] for i in range(0,len(al),l)]
+
+def parse_toc(zfile):
+    soup = BeautifulSoup(zfile.read('META-INF/container.xml'), 'html5lib')
+    opf = soup.find('rootfile').attrs['full-path']
+
+    basedir = os.path.dirname(opf)
+    if basedir:
+        basedir = '{0}/'.format(basedir)
+
+    soup = BeautifulSoup(zfile.read(opf), 'html5lib')
+
+    toc = []
+    title = str(soup.find('dc:title').text)
+    author = str(soup.find('dc:creator').text)
+
+    flnames = {}
+    ncx = None
+    for item in soup.find('manifest').findAll('item'):
+        flnames[item['id']] = '{0}{1}'.format(basedir, item['href'])
+        if item['media-type'] == 'application/x-dtbncx+xml':
+            ncx = '{0}{1}'.format(basedir, item['href'])
+
+    chorder = []
+    for item in soup.find('spine').findAll('itemref'):
+        chorder.append(flnames[item['idref']])
+
+    chnames = {}
+    if ncx:
+        soup = BeautifulSoup(zfile.read(ncx), 'html5lib')
+        for np in soup.findAll('navpoint'):
+            k = np.find('content').get('src', None).split('#')[0]
+            if k:
+                chnames[k] = np.find('navlabel').text.strip()
+            # print("Navpoint", k, chnames[k])
+
+    for ch in chorder:
+        if ch in chnames:
+            toc.append((chnames[ch], ch))
+        else:
+            toc.append(('<~>', ch))
+
+    return title,author,toc
+
+class EpubViewer:
+    def __init__(self, fl):
+        self.epub = zipfile.ZipFile(fl, 'r')
+        self.title, self.author, self.toc = parse_toc(self.epub)
+        self.ntoc = len(self.toc)
+        self.mode = "TOC"
+
+        self.toc_start = 0
+        self.toc_cur = 0
+
+        self.ch_page = 0
+        self.ch_cur = -1
+
+    def __call__(self, screen):
+        curses.curs_set(0)
+        while True:
+            self.l, self.c = screen.getmaxyx()
+            self.pad = int(self.c/4)
+            self.w = int(self.c/2)
+
+            self.show_title(screen)
+            if self.mode == "TOC":
+                self.show_toc(screen)
+            elif self.mode == "CH":
+                self.show_pagenum(screen)
+                self.show_page(screen)
+
+            c = screen.getch()
+            dirty = True
+
+            # next page keys
+            if self.mode == "TOC":
+                if c == ord('j'):
+                    if self.toc_cur < self.ntoc - 1:
+                        self.toc_cur += 1
+                        if self.toc_cur - self.toc_start > 2*self.l/3:
+                            self.toc_start += 1
+                        else:
+                            dirty = False
+                elif c == ord('k'):
+                    if self.toc_cur > 0:
+                        self.toc_cur -= 1
+                        if self.toc_cur - self.toc_start > self.l/3 and self.toc_start > 0:
+                            self.toc_start -= 1
+                        else:
+                            dirty = False
+                elif c == ord('o'):
+                    self.toc_cur -= 1
+                    self.next_ch()
+                    self.mode = 'CH'
+                elif c == ord('q'):
+                    return
+                else:
+                    dirty = False
+            elif self.mode == "CH":
+                if c == ord('j'):
+                    if self.ch_page == len(self.ch_cur)-1:
+                        self.next_ch()
+                    else:
+                        self.ch_page += 1
+                elif c == ord('k'):
+                   if self.ch_page == 0:
+                       self.prev_ch()
+                   else:
+                       self.ch_page -= 1
+                elif c == ord('n'):
+                    self.next_ch()
+                elif c == ord('p'):
+                    self.prev_ch()
+                elif c == ord('b'):
+                    self.mode = 'TOC'
+                elif c == ord('q'):
+                    return
+                else:
+                    dirty = False
+
+            if dirty:
+                screen.clear()
+
+
+    def next_ch(self):
+        if self.toc_cur < self.ntoc - 1:
+            self.toc_cur += 1
+        self.ch_page = 0
+        self.ch_cur = parse_chapter(self.epub, self.toc[self.toc_cur][1],
+                                    (self.l, self.w))
+
+    def prev_ch(self):
+        if self.toc_cur > 0:
+            self.toc_cur -= 1
+        self.ch_page = 0
+        self.ch_cur = parse_chapter(self.epub, self.toc[self.toc_cur][1],
+                                    (self.l, self.w))
+
+    def show_pagenum(self, screen):
+        y,x = self.l-1, self.pad + self.w + 5
+        screen.addstr(y, x, '{0}/{1} - {2}'.format(self.ch_page+1, len(self.ch_cur), self.toc[self.toc_cur][0]))
+
+    def show_title(self, screen):
+        tlines = textwrap.wrap(self.title, width=self.pad-5)
+        for i,ln in enumerate(tlines):
+            screen.addstr(i,0,ln, curses.A_BOLD)
+        alines = textwrap.wrap(' - ' + self.author, width=self.pad-5)
+        for i,ln in enumerate(alines):
+            screen.addstr(len(tlines)+i,0,ln, curses.A_ITALIC)
+
+    def show_toc(self, screen):
+        ts = self.toc_start
+        te = min(ts+self.l,self.ntoc)
+
+        for i,(chname,chfile) in enumerate(self.toc[ts:te]):
+            screen.addstr(i,self.pad, chname)
+            screen.clrtoeol()
+
+        screen.chgat(self.toc_cur-ts, self.pad, self.w, curses.A_REVERSE)
+
+    def show_page(self, screen):
+        # eprint("Show page", self.ch_cur)
+        for i,line in enumerate(self.ch_cur[self.ch_page]):
+            if '#' in line:
+                state = -1
+                k = 0
+                for c in line:
+                    if c == '#':
+                        state = -1
+                        continue
+                    if state < 0:
+                        if c == 'I':
+                            state = curses.A_ITALIC
+                        elif c == 'i':
+                            state = 0
+                        elif c == 'B':
+                            state = curses.A_BOLD
+                        elif c == 'b':
+                            state = 0
+                    elif state > 0:
+                        screen.addstr(i, self.pad+k, c, state)
+                        k += 1
+            else:
+                screen.addstr(i, self.pad, line)
+
+
+if __name__ == '__main__':
+    fl = sys.argv[1]
+    viewer = EpubViewer(fl)
+    curses.wrapper(viewer)
+
