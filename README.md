@@ -6,7 +6,7 @@ Based on https://github.com/rupa/epub
 
 usage: cpub <filename>
 
-![GIF](https://gfycat.com/OblongSaneChimneyswift.gif)
+![GIF](https://thumbs.gfycat.com/OblongSaneChimneyswift-size_restricted.gif)
 
 Controls
 --------

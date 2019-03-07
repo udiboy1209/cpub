@@ -26,25 +26,30 @@ def parse_chapter(zfile, chfname, ssize):
         def __init__(self, stream):
             HTMLParser.__init__(self)
             self.stream = stream
+            self.style = False
 
         def handle_data(self, data):
             self.stream.write(data)
 
         def handle_starttag(self, tag, attr):
+            attr = dict(attr)
+            # eprint(tag, attr)
             if tag == "p":
                 self.stream.write(' ')
-            elif tag == "i":
+            elif tag == "i" or (tag == "span" and attr['class'] == "italic"):
                 self.stream.write('#I')
-            elif tag == "b":
+                self.style = True
+            elif tag == "b" or (tag == "span" and attr['class'] == "bold"):
                 self.stream.write('#B')
+                self.style = True
 
         def handle_endtag(self, tag):
+            eprint("end", tag)
             if tag == "p":
                 self.stream.write('\n')
-            elif tag == "i":
-                self.stream.write('#i')
-            elif tag == "b":
-                self.stream.write('#b')
+            elif self.style and (tag == "i" or tag == "b" or tag == "span"):
+                self.stream.write('#e')
+                self.style = False
 
     l,c = ssize
     nch = l*c
@@ -100,11 +105,11 @@ def parse_toc(zfile):
                 chnames[k] = np.find('navlabel').text.strip()
             # print("Navpoint", k, chnames[k])
 
-    for ch in chorder:
+    for i,ch in enumerate(chorder):
         if ch in chnames:
             toc.append((chnames[ch], ch))
         else:
-            toc.append(('<~>', ch))
+            toc.append(('<unnamed-%d>' % i, ch))
 
     return title,author,toc
 
@@ -164,7 +169,7 @@ class EpubViewer:
                     dirty = False
             elif self.mode == "CH":
                 if c == ord('j'):
-                    if self.ch_page == len(self.ch_cur)-1:
+                    if self.ch_page >= len(self.ch_cur)-1:
                         self.next_ch()
                     else:
                         self.ch_page += 1
@@ -226,9 +231,14 @@ class EpubViewer:
 
     def show_page(self, screen):
         # eprint("Show page", self.ch_cur)
+        if len(self.ch_cur) == 0:
+            screen.addstr(0, self.pad, "empty", curses.A_ITALIC)
+            return
+
+        state = 0
         for i,line in enumerate(self.ch_cur[self.ch_page]):
             if '#' in line:
-                state = -1
+                eprint(self.toc_cur,self.ch_page,i,line)
                 k = 0
                 for c in line:
                     if c == '#':
@@ -237,13 +247,11 @@ class EpubViewer:
                     if state < 0:
                         if c == 'I':
                             state = curses.A_ITALIC
-                        elif c == 'i':
-                            state = 0
                         elif c == 'B':
                             state = curses.A_BOLD
-                        elif c == 'b':
+                        elif c == 'e':
                             state = 0
-                    elif state > 0:
+                    else:
                         screen.addstr(i, self.pad+k, c, state)
                         k += 1
             else:
