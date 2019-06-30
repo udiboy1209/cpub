@@ -13,6 +13,7 @@ import sys
 import io
 import zipfile
 import textwrap
+import re
 
 def eprint(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
@@ -33,7 +34,6 @@ def parse_chapter(zfile, chfname, ssize):
 
         def handle_starttag(self, tag, attr):
             attr = dict(attr)
-            # eprint(tag, attr)
             if tag == "p":
                 self.stream.write(' ')
             elif tag == "i" or (tag == "span" and attr['class'] == "italic"):
@@ -42,20 +42,26 @@ def parse_chapter(zfile, chfname, ssize):
             elif tag == "b" or (tag == "span" and attr['class'] == "bold"):
                 self.stream.write('#B')
                 self.style = True
+            elif tag == "br":
+                self.stream.write('\n')
 
         def handle_endtag(self, tag):
-            eprint("end", tag)
             if tag == "p":
                 self.stream.write('\n')
             elif self.style and (tag == "i" or tag == "b" or tag == "span"):
                 self.stream.write('#e')
                 self.style = False
 
+        def handle_startendtag(self, tag, attr):
+            if tag == "br":
+                self.stream.write('\n')
+
     l,c = ssize
     nch = l*c
 
     soup = BeautifulSoup(zfile.read(chfname), 'html5lib')
-    html_snip = str(soup.find('body'))
+    html_snip = re.sub(r"\n\s*", r" ", str(soup.find('body')))
+    re.sub
     # eprint("html:", html_snip)
 
     stream = io.StringIO()
@@ -115,16 +121,30 @@ def parse_toc(zfile):
 
 class EpubViewer:
     def __init__(self, fl):
-        self.epub = zipfile.ZipFile(fl, 'r')
+        try:
+            self.epub = zipfile.ZipFile(fl, 'a')
+            self.writable = True
+        except:
+            self.epub = zipfile.ZipFile(fl, 'r')
+            self.writable = False
         self.title, self.author, self.toc = parse_toc(self.epub)
         self.ntoc = len(self.toc)
-        self.mode = "TOC"
 
-        self.toc_start = 0
-        self.toc_cur = 0
+        # eprint(self.epub.namelist())
+        if 'bookmark.cpub' in self.epub.namelist():
+            self.mode = "BMK"
+            bmk = self.epub.read('bookmark.cpub').split(b':')
+            self.toc_cur = int(bmk[0])
+            self.toc_start = max(self.toc_cur - 5, 0)
+            self.bmk_page, self.bmk_len = int(bmk[2]), int(bmk[1])
+        else:
+            self.mode = "TOC"
 
-        self.ch_page = 0
-        self.ch_cur = -1
+            self.toc_start = 0
+            self.toc_cur = 0
+
+            self.ch_page = 0
+            self.ch_cur = None
 
     def __call__(self, screen):
         curses.curs_set(0)
@@ -139,6 +159,13 @@ class EpubViewer:
             elif self.mode == "CH":
                 self.show_pagenum(screen)
                 self.show_page(screen)
+            elif self.mode == "BMK":
+                self.toc_cur -= 1
+                self.next_ch()
+                self.ch_page = (self.bmk_page * len(self.ch_cur)) // self.bmk_len
+                
+                self.mode = "CH"
+                continue
 
             c = screen.getch()
             dirty = True
@@ -164,6 +191,8 @@ class EpubViewer:
                     self.next_ch()
                     self.mode = 'CH'
                 elif c == ord('q'):
+                    if self.writable:
+                        self.save_bookmark()
                     return
                 else:
                     dirty = False
@@ -185,6 +214,8 @@ class EpubViewer:
                 elif c == ord('b'):
                     self.mode = 'TOC'
                 elif c == ord('q'):
+                    if self.writable:
+                        self.save_bookmark()
                     return
                 else:
                     dirty = False
@@ -209,7 +240,11 @@ class EpubViewer:
 
     def show_pagenum(self, screen):
         y,x = self.l-1, self.pad + self.w + 5
-        screen.addstr(y, x, '{0}/{1} - {2}'.format(self.ch_page+1, len(self.ch_cur), self.toc[self.toc_cur][0]))
+        pageinfo = textwrap.wrap('{0}/{1} - {2}'.format(self.ch_page+1, len(self.ch_cur), self.toc[self.toc_cur][0]),
+                                width=self.c - x)
+        for l in reversed(pageinfo):
+            screen.addstr(y, x, l)
+            y -= 1
 
     def show_title(self, screen):
         tlines = textwrap.wrap(self.title, width=self.pad-5)
@@ -257,6 +292,8 @@ class EpubViewer:
             else:
                 screen.addstr(i, self.pad, line)
 
+    def save_bookmark(self):
+        self.epub.writestr('bookmark.cpub', '{0}:{1}:{2}'.format(self.toc_cur, len(self.ch_cur), self.ch_page))
 
 if __name__ == '__main__':
     fl = sys.argv[1]
