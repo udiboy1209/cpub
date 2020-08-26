@@ -36,10 +36,10 @@ def parse_chapter(zfile, chfname, ssize):
             attr = dict(attr)
             if tag == "p":
                 self.stream.write(' ')
-            elif tag == "i" or (tag == "span" and attr['class'] == "italic"):
+            elif tag == "i" or (tag == "span" and 'class' in attr and attr['class'] == "italic"):
                 self.stream.write('#I')
                 self.style = True
-            elif tag == "b" or (tag == "span" and attr['class'] == "bold"):
+            elif tag == "b" or (tag == "span" and 'class' in attr and attr['class'] == "bold"):
                 self.stream.write('#B')
                 self.style = True
             elif tag == "br":
